@@ -6,13 +6,16 @@ var bunyan = require('bunyan');
 var fs = require('fs');
 
 var log = bunyan.createLogger({name: "shadow-ldap"});
+
+// move to configuration file.
 var rootDN = 'dc=world';
 var passwd_file = 'test/etc/passwd';
+var group_file = 'test/etc/group';
 
 function loadPasswdFile(req, res, next) {
   fs.readFile(passwd_file, 'utf8', function(err, data) {
     if (err)
-      return next(new ldap.OperationsError(err.message));
+		return next(new ldap.OperationsError(err.message));
 
     req.users = {};
 
@@ -26,15 +29,15 @@ function loadPasswdFile(req, res, next) {
         continue;
 
       req.users[record[0]] = {
-        dn: 'cn=' + record[0] + ', ou=Accounts, '+rootDN,
+        dn: 'uid=' + record[0] + ', ou=Accounts, '+rootDN,
         attributes: {
-          cn: record[0],
-          uid: record[2],
-          gid: record[3],
+          uid: record[0],
+          uidNumber: record[2],
+          gidNumber: record[3],
           description: record[4],
-          homedirectory: record[5],
-          shell: record[6] || '',
-          objectclass: 'unixUser'
+          homeDirectory: record[5],
+          loginShell: record[6] || '',
+          objectclass: ['top', 'posixAccount']
         }
       };
     }
@@ -43,8 +46,39 @@ function loadPasswdFile(req, res, next) {
   });
 }
 
+function loadGroupFile(req, res, next) {
+	fs.readFile(group_file, 'utf8', function(err, data) {
+    if (err)
+		return next(new ldap.OperationsError(err.message));
 
-var pre = [loadPasswdFile];
+	req.groups = {};
+ 	var lines = data.split('\n');
+    for (var i = 0; i < lines.length; i++) {
+		if (!lines[i] || /^#/.test(lines[i]))
+        	continue;
+     	var record = lines[i].split(':');
+      	if (!record || !record.length)
+        	continue;  
+       	// sasl:x:45:smmta,smmsp
+       	var members = record[3].split(',');
+       	if (!members || !members.length)
+        	continue; 	 
+    	req.groups[record[0]] = { 	
+       		dn: 'cn=' + record[0] + ', ou=Groups, '+rootDN,	
+       		attributes: {
+       			cn: record[0],
+       			gidNumber: record[2],
+       			memberUid: members.length > 1 ? members : [record[0]],
+       			objectclass: ['top', 'posixGroup']	
+       		}
+       	};
+    }
+    return next();
+  });	
+}
+
+var preUsers = [loadPasswdFile];
+var preGroups = [loadGroupFile];
 var server = ldap.createServer();
 server.log = log;
 
@@ -92,26 +126,48 @@ server.search('cn=Subschema', function(req, res, next) {
 	return next();
 });
 
-server.search('ou=Accounts,'+rootDN, pre, function(req, res, next) {
-  console.log("scope "+req.scope+" filter "+req.filter+" baseObject "+req.baseObject);
-  
-  // This is for the base call for 'ou=Accounts,'+rootDN
-  if('one' == req.scope){
-  	//console.log("users: %s", JSON.stringify(req.users));
-	Object.keys(req.users).forEach(function(k) {
-	if (req.filter.matches(req.users[k].attributes))
-		res.send(req.users[k]);
-	});
-  } 
-  if('base' == req.scope){
-	var dn = parseDN(req.baseObject.toString());
-	//console.log("cn: %s, dn: %s", dn.cn,  JSON.stringify(dn));
-	//console.log("sending: %s", JSON.stringify(req.users[dn.rdns[0].cn]));
-	res.send(req.users[dn.rdns[0].cn]);
-  }
 
-  res.end();
-  return next();
+server.search('ou=Groups,'+rootDN, preGroups, function(req, res, next) {
+	console.log("scope "+req.scope+" filter "+req.filter+" baseObject "+req.baseObject);
+  	if('one' == req.scope) { // List Call for Groups 
+  		//console.log("groups: %s", JSON.stringify(req.groups));
+		Object.keys(req.groups).forEach(function(k) {
+		if (req.filter.matches(req.groups[k].attributes))
+			res.send(req.groups[k]);
+		});
+  	} else if(req.baseObject.toString().indexOf('ou=Groups, '+rootDN) == 0) {  // Base Call for Groups
+  		var ou = {dn: 'ou=Groups,'+rootDN, attributes: { objectclass: ['top', 'organizationalUnit'], hasSubordinates: ['TRUE'] } };
+  		res.send(ou);
+  	} else {
+		var dn = parseDN(req.baseObject.toString());  // Call for Groups Subs
+		//console.log("uid: %s, dn: %s", dn.uid,  JSON.stringify(dn));
+		//console.log("sending: %s", JSON.stringify(req.groups[dn.rdns[0].cn]));
+		res.send(req.groups[dn.rdns[0].cn]);
+  	}
+  	res.end();
+  	return next();
+});
+
+server.search('ou=Accounts,'+rootDN, preUsers, function(req, res, next) {
+	console.log("scope "+req.scope+" filter "+req.filter+" baseObject "+req.baseObject);
+  
+  	if('one' == req.scope) { // List Call for Accounts 
+  		//console.log("users: %s", JSON.stringify(req.users));
+		Object.keys(req.users).forEach(function(k) {
+		if (req.filter.matches(req.users[k].attributes))
+			res.send(req.users[k]);
+		});
+  	} else if(req.baseObject.toString().indexOf('ou=Accounts, '+rootDN) == 0) {  // Base Call for Accounts
+  		var ou = {dn: 'ou=Accounts,'+rootDN, attributes: { objectclass: ['top', 'organizationalUnit'], hasSubordinates: ['TRUE'] } };
+  		res.send(ou);
+  	} else {
+		var dn = parseDN(req.baseObject.toString());  // Call for Accounts Subs
+		//console.log("uid: %s, dn: %s", dn.uid,  JSON.stringify(dn));
+		//console.log("sending: %s", JSON.stringify(req.users[dn.rdns[0].uid]));
+		res.send(req.users[dn.rdns[0].uid]);
+  	}
+  	res.end();
+  	return next();
 });
 
 server.search(rootDN, function(req, res, next) {
