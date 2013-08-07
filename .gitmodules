@@ -1,0 +1,7 @@
+[submodule "lib/sha512crypt-node"]
+	path = lib/sha512crypt-node
+	url = https://github.com/mvo5/sha512crypt-node.git
+[submodule "lib/node-ldapjs"]
+	path = lib/node-ldapjs
+	url = https://github.com/mcavage/node-ldapjs.git
+	
